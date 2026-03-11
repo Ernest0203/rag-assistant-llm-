@@ -10,6 +10,8 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+from langchain_community.retrievers import BM25Retriever
+from rank_bm25 import BM25Okapi
 from dotenv import load_dotenv
 import tempfile
 import os
@@ -75,10 +77,42 @@ async def ask(request: QuestionRequest):
             detail="Database is empty. Please upload documents first."
         )
 
-    retriever = vectordb.as_retriever(search_kwargs={"k": 5})
-
-    # Получаем релевантные чанки
-    relevant_docs = retriever.invoke(request.question)
+    # Получаем релевантные чанки через векторный поиск
+    vector_retriever = vectordb.as_retriever(search_kwargs={"k": 5})
+    vector_docs = vector_retriever.invoke(request.question)
+    
+    # BM25 поиск вручную
+    all_docs_result = vectordb.get()
+    corpus = all_docs_result["documents"]
+    metadatas = all_docs_result["metadatas"]
+    
+    if corpus:
+        tokenized_corpus = [doc.lower().split() for doc in corpus]
+        bm25 = BM25Okapi(tokenized_corpus)
+        tokenized_query = request.question.lower().split()
+        scores = bm25.get_scores(tokenized_query)
+        
+        # Берём топ-5 по BM25
+        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:5]
+        
+        bm25_docs = []
+        for i in top_indices:
+            bm25_docs.append(
+                type('Doc', (), {
+                    'page_content': corpus[i],
+                    'metadata': metadatas[i]
+                })()
+            )
+        
+        # Объединяем результаты, убираем дубли
+        seen = set()
+        relevant_docs = []
+        for doc in vector_docs + bm25_docs:
+            if doc.page_content not in seen:
+                seen.add(doc.page_content)
+                relevant_docs.append(doc)
+    else:
+        relevant_docs = vector_docs
 
     # Собираем citations — уникальные источники
     sources = list(set(
